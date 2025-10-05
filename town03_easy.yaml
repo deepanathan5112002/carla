@@ -1,0 +1,34 @@
+# Town03 Easy Configuration
+environment:
+  town: "Town03"
+  weather: "ClearNoon"
+  num_npc_vehicles: 10
+  num_npc_pedestrians: 5
+  
+spawn:
+  spawn_points: [0, 10, 20, 30, 40]  # indices
+  
+sensors:
+  camera:
+    width: 640
+    height: 480
+    fov: 90
+    x: 1.5
+    z: 1.6
+    
+perception:
+  model_path: "models/yolov8n_traffic.onnx"
+  inference_fps: 10
+  confidence_threshold: 0.5
+  
+rl:
+  episodes: 1000
+  max_steps: 2000
+  
+rewards:
+  progress: 1.0
+  lane_keeping: 0.5
+  speed_compliance: 2.0
+  stop_compliance: 5.0
+  collision: -100.0
+  off_road: -50.0
