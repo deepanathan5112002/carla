@@ -68,7 +68,7 @@ def make_env(config_path: str, port: int, seed: int, use_shield: bool = True):
     return _init
 
 def train_ppo(
-    config_path: str = "configs/town03_easy.yaml",
+    config_path: str = "town03_easy.yaml",
     num_envs: int = 4,
     total_timesteps: int = 5_000_000,
     use_shield: bool = True,
@@ -162,7 +162,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description='Train PPO agent in CARLA')
-    parser.add_argument('--config', type=str, default='configs/town03_easy.yaml')
+    parser.add_argument('--config', type=str, default='town03_easy.yaml')
     parser.add_argument('--envs', type=int, default=4)
     parser.add_argument('--timesteps', type=int, default=5_000_000)
     parser.add_argument('--shield', action='store_true', help='Use safety shield')
