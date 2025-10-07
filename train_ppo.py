@@ -78,8 +78,6 @@ def train_ppo(
     
     logger.info(f"Starting training: {experiment_name}")
     logger.info(f"Config: {config_path}")
-    logger.info(f"Starting training: {experiment_name}")
-    logger.info(f"Config: {config_path}")
     logger.info(f"Num environments: {num_envs}")
     logger.info(f"Safety shield: {use_shield}")
     
