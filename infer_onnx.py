@@ -8,6 +8,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 class TrafficSignDetector:
     """ONNX-based traffic sign/light detector"""
     
@@ -19,10 +20,26 @@ class TrafficSignDetector:
     ):
         # Initialize ONNX runtime
         providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-        self.session = ort.InferenceSession(model_path, providers=providers)
+        try:
+            self.session = ort.InferenceSession(model_path, providers=providers)
+            logger.info(f"Loaded ONNX model: {model_path}")
+        except Exception as e:
+            logger.error(f"Failed to load model: {e}")
+            raise
         
         self.input_name = self.session.get_inputs()[0].name
         self.input_shape = self.session.get_inputs()[0].shape
+        
+        # Extract input dimensions (handle different formats)
+        if len(self.input_shape) == 4:  # NCHW format
+            self.input_height = self.input_shape[2]
+            self.input_width = self.input_shape[3]
+        else:
+            logger.warning("Unexpected input shape, using default 640x640")
+            self.input_height = 640
+            self.input_width = 640
+        
+        logger.info(f"Model input: {self.input_name}, shape: {self.input_shape}")
         
         self.confidence_threshold = confidence_threshold
         
@@ -63,42 +80,70 @@ class TrafficSignDetector:
     
     def preprocess(self, image: np.ndarray) -> np.ndarray:
         """Preprocess image for inference"""
-        # Resize to model input size
-        height, width = self.input_shape[2:4]
-        resized = cv2.resize(image, (width, height))
-        
-        # Normalize
-        normalized = resized.astype(np.float32) / 255.0
-        
-        # Transpose to NCHW format
-        transposed = np.transpose(normalized, (2, 0, 1))
-        
-        # Add batch dimension
-        batched = np.expand_dims(transposed, axis=0)
-        
-        return batched
+        try:
+            # Resize to model input size
+            resized = cv2.resize(image, (self.input_width, self.input_height))
+            
+            # Normalize to [0, 1]
+            normalized = resized.astype(np.float32) / 255.0
+            
+            # Transpose to NCHW format (channels first)
+            transposed = np.transpose(normalized, (2, 0, 1))
+            
+            # Add batch dimension
+            batched = np.expand_dims(transposed, axis=0)
+            
+            return batched
+            
+        except Exception as e:
+            logger.error(f"Preprocessing error: {e}")
+            raise
     
     def postprocess(self, outputs: np.ndarray) -> Dict:
         """Process model outputs into rule state"""
-        # This is a simplified version - adjust based on your model's output format
-        # Assuming YOLOv8 style outputs
-        
         detections = []
         
-        # Parse detections (simplified)
-        for detection in outputs[0]:
-            confidence = detection[4]
-            if confidence > self.confidence_threshold:
-                class_probs = detection[5:]
-                class_id = np.argmax(class_probs)
-                class_conf = class_probs[class_id]
+        # Validate output
+        if outputs is None or len(outputs) == 0:
+            self.detection_buffer.append(detections)
+            return self._aggregate_detections()
+        
+        try:
+            # Assuming YOLOv8 format: [batch, num_detections, 5+num_classes]
+            # outputs[0] shape: [num_detections, 5+num_classes]
+            # Each detection: [x, y, w, h, confidence, class_prob_0, class_prob_1, ...]
+            output = outputs[0]
+            
+            if len(output.shape) < 2:
+                logger.warning(f"Unexpected output shape: {output.shape}")
+                self.detection_buffer.append(detections)
+                return self._aggregate_detections()
+            
+            for detection in output:
+                if len(detection) < 5:
+                    continue
                 
-                if class_conf > self.confidence_threshold:
-                    detections.append({
-                        'class_id': class_id,
-                        'confidence': float(class_conf),
-                        'bbox': detection[:4]
-                    })
+                # Extract confidence and class probabilities
+                confidence = detection[4]
+                
+                if confidence > self.confidence_threshold:
+                    class_probs = detection[5:]
+                    
+                    if len(class_probs) == 0:
+                        continue
+                    
+                    class_id = np.argmax(class_probs)
+                    class_conf = class_probs[class_id]
+                    
+                    if class_conf > self.confidence_threshold:
+                        detections.append({
+                            'class_id': int(class_id),
+                            'confidence': float(confidence * class_conf),
+                            'bbox': detection[:4].tolist()
+                        })
+        
+        except Exception as e:
+            logger.error(f"Postprocess error: {e}")
         
         # Update detection buffer
         self.detection_buffer.append(detections)
@@ -112,35 +157,39 @@ class TrafficSignDetector:
         """Aggregate temporal detections into stable rule state"""
         current_time = time.time()
         
-        # Count detections by class
+        # Count detections by class over temporal buffer
         class_counts = {}
         total_confidence = 0.0
         
         for frame_detections in self.detection_buffer:
             for det in frame_detections:
                 class_name = self.class_map.get(det['class_id'], 'unknown')
-                class_counts[class_name] = class_counts.get(class_name, 0) + 1
-                total_confidence += det['confidence']
+                if class_name != 'unknown':
+                    class_counts[class_name] = class_counts.get(class_name, 0) + 1
+                    total_confidence += det['confidence']
         
         # Update persistent state with decay
         state = self.persistent_state.copy()
         
+        # Threshold: need detection in at least 1/3 of frames
+        detection_threshold = max(1, len(self.detection_buffer) // 3)
+        
         # Speed limits (persistent until new one detected)
         for speed_class in ['speed_20', 'speed_30', 'speed_50', 'speed_60', 
                            'speed_70', 'speed_80', 'speed_100', 'speed_120']:
-            if class_counts.get(speed_class, 0) > len(self.detection_buffer) // 3:
+            if class_counts.get(speed_class, 0) >= detection_threshold:
                 speed_value = int(speed_class.split('_')[1])
                 state['speed_limit'] = speed_value
                 self.last_detection_time['speed_limit'] = current_time
         
-        # Stop signs (temporary state)
-        if class_counts.get('stop', 0) > len(self.detection_buffer) // 3:
+        # Stop signs (temporary state, decays after 3 seconds)
+        if class_counts.get('stop', 0) >= detection_threshold:
             state['must_stop'] = True
             self.last_detection_time['stop'] = current_time
         elif current_time - self.last_detection_time.get('stop', 0) > 3.0:
             state['must_stop'] = False
         
-        # Traffic lights
+        # Traffic lights (immediate state based on current detections)
         red_count = class_counts.get('traffic_light_red', 0)
         yellow_count = class_counts.get('traffic_light_yellow', 0)
         green_count = class_counts.get('traffic_light_green', 0)
@@ -152,30 +201,40 @@ class TrafficSignDetector:
             state['traffic_light'] = 'yellow'
         elif green_count > 0:
             state['traffic_light'] = 'green'
+            state['must_stop'] = False
         
-        # No entry zones
-        if class_counts.get('no_entry', 0) > len(self.detection_buffer) // 3:
+        # No entry zones (temporary, decays after 2 seconds)
+        if class_counts.get('no_entry', 0) >= detection_threshold:
             state['no_entry'] = True
             self.last_detection_time['no_entry'] = current_time
         elif current_time - self.last_detection_time.get('no_entry', 0) > 2.0:
             state['no_entry'] = False
         
-        # Average confidence
-        if len(self.detection_buffer) > 0:
-            state['confidence'] = total_confidence / max(1, sum(len(d) for d in self.detection_buffer))
+        # Average confidence across all detections
+        total_detections = sum(len(d) for d in self.detection_buffer)
+        if total_detections > 0:
+            state['confidence'] = min(1.0, total_confidence / total_detections)
+        else:
+            state['confidence'] = 0.0
         
         self.persistent_state = state
         return state
     
     def infer(self, image: np.ndarray) -> Dict:
         """Run inference on image and return rule state"""
-        # Preprocess
-        input_tensor = self.preprocess(image)
-        
-        # Run inference
-        outputs = self.session.run(None, {self.input_name: input_tensor})
-        
-        # Postprocess
-        rule_state = self.postprocess(outputs[0])
-        
-        return rule_state
+        try:
+            # Preprocess
+            input_tensor = self.preprocess(image)
+            
+            # Run inference
+            outputs = self.session.run(None, {self.input_name: input_tensor})
+            
+            # Postprocess
+            rule_state = self.postprocess(outputs[0])
+            
+            return rule_state
+            
+        except Exception as e:
+            logger.error(f"Inference error: {e}")
+            # Return default state on error
+            return self._default_state()
