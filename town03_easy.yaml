@@ -1,12 +1,13 @@
-# Town03 Easy Configuration
+# Optimized Configuration Based on Training Results
+
 environment:
   town: "Town03"
   weather: "ClearNoon"
-  num_npc_vehicles: 10
-  num_npc_pedestrians: 5
+  num_npc_vehicles: 3  # Reduced for stability
+  num_npc_pedestrians: 1
   
 spawn:
-  spawn_points: [0, 10, 20, 30, 40]  # indices
+  spawn_points: [0, 5, 10, 15, 20, 25, 30, 35, 40]  # More variety
   
 sensors:
   camera:
@@ -18,17 +19,38 @@ sensors:
     
 perception:
   model_path: "models/yolov8n_traffic.onnx"
-  inference_fps: 10
-  confidence_threshold: 0.5
+  inference_fps: 6  # Reduced from 10 for performance
+  confidence_threshold: 0.6  # Increased for reliability
   
 rl:
-  episodes: 1000
+  episodes: 2000
   max_steps: 2000
   
+# Optimized reward structure based on training results
 rewards:
-  progress: 1.0
-  lane_keeping: 0.5
-  speed_compliance: 2.0
-  stop_compliance: 5.0
-  collision: -100.0
-  off_road: -50.0
+  progress: 2.5           # Increased - encourage forward movement
+  lane_keeping: 0.15      # Reduced - less harsh penalty
+  speed_compliance: 0.8   # Reduced - soft speed enforcement
+  stop_compliance: 3.0    # Moderate penalty
+  collision: -40.0        # Reduced from -100 for better learning
+  off_road: -25.0         # Reduced from -50
+
+# Curriculum learning stages (optional)
+curriculum:
+  stage1:  # Easy (0-50k steps)
+    num_npc_vehicles: 0
+    rewards:
+      collision: -30.0
+      off_road: -20.0
+  
+  stage2:  # Medium (50k-150k steps)
+    num_npc_vehicles: 2
+    rewards:
+      collision: -40.0
+      off_road: -25.0
+  
+  stage3:  # Hard (150k+ steps)
+    num_npc_vehicles: 5
+    rewards:
+      collision: -50.0
+      off_road: -30.0
