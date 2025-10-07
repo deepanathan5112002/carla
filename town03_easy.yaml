@@ -28,12 +28,12 @@ rl:
   
 # Optimized reward structure based on training results
 rewards:
-  progress: 20.0           # Increased - encourage forward movement
-  lane_keeping: 0.05      # Reduced - less harsh penalty
-  speed_compliance: 0.2   # Reduced - soft speed enforcement
-  stop_compliance: 1.5    # Moderate penalty
-  collision: -30.0        # Reduced from -100 for better learning
-  off_road: -15.0         # Reduced from -50
+  progress: 30.0          # ✅ INCREASE from 20.0 to 30.0
+  lane_keeping: 0.02      # ✅ REDUCE from 0.05 to 0.02
+  speed_compliance: 0.1   # ✅ REDUCE from 0.2 to 0.1
+  stop_compliance: 1.0
+  collision: -25.0        # ✅ SOFTER from -30
+  off_road: -10.0  
 
 # Curriculum learning stages (optional)
 curriculum:
