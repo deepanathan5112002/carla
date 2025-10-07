@@ -449,9 +449,15 @@ class CarlaRuleAwareEnv(gym.Env):
         self._last_action = action.copy()
         
         # 9. Forward progress bonus (encourage moving)
-        if speed_kmh > 5.0:
-            reward += 0.1
-        
+        if self.step_count > 100:  # After initial settling
+            if speed_kmh < 5.0:  # Too slow
+                reward -= 2.0  # Strong penalty for not moving
+            elif speed_kmh < 15.0:  # Moving but too cautious
+                reward -= 0.5
+    
+        # 10. Bonus for maintaining good speed
+        if 20.0 < speed_kmh < speed_limit:
+            reward += 0.5
         return float(np.clip(reward, -100.0, 10.0))
     
     def _check_termination(self, obs: np.ndarray) -> bool:
@@ -468,12 +474,14 @@ class CarlaRuleAwareEnv(gym.Env):
         
         # Off-road termination (more lenient)
         lane_offset = obs[2] * 5.0
-        if abs(lane_offset) > 6.0:  # Increased from 5.0
+        if abs(lane_offset) > 7.0:  # ✅ INCREASED from 6.0 - more forgiving
             return True
         
-        # Stuck detection (no progress for long time)
-        if self.step_count > 200 and self.episode_metrics['distance_traveled'] < 10.0:
-            return True
+        # ✅ NEW: Terminate if stuck (not moving for too long)
+        if self.step_count > 500:  # After 500 steps
+            if self.episode_metrics['distance_traveled'] < 20.0:  # Moved less than 20m
+                logger.debug("Episode terminated: stuck/not moving")
+                return True
         
         return False
     
