@@ -458,7 +458,19 @@ class CarlaRuleAwareEnv(gym.Env):
         # 10. Bonus for maintaining good speed
         if 20.0 < speed_kmh < speed_limit:
             reward += 0.5
-        return float(np.clip(reward, -100.0, 10.0))
+
+        # 11. Exploration bonus (encourage trying new things)
+        if self.step_count < 1000:  # Only during episode
+            if speed_kmh > 25.0:  # Reward for going faster
+                reward += 1.0
+            
+        # 12. Big bonus for surviving long episodes
+        if self.step_count > 1000:
+            reward += 5.0  # Staying alive bonus
+        if self.step_count > 1500:
+            reward += 10.0  # Even bigger bonus
+
+        return float(np.clip(reward, -100.0, 100.0))
     
     def _check_termination(self, obs: np.ndarray) -> bool:
         """Check if episode should terminate"""
@@ -472,18 +484,13 @@ class CarlaRuleAwareEnv(gym.Env):
             self.episode_metrics['route_completion'] = 1.0
             return True
         
-        # Off-road termination (more lenient)
+        # Off-road termination (MUCH MORE LENIENT)
         lane_offset = obs[2] * 5.0
-        if abs(lane_offset) > 7.0:  # ✅ INCREASED from 6.0 - more forgiving
+        if abs(lane_offset) > 10.0:  
             return True
         
-        # ✅ NEW: Terminate if stuck (not moving for too long)
-        if self.step_count > 500:  # After 500 steps
-            if self.episode_metrics['distance_traveled'] < 20.0:  # Moved less than 20m
-                logger.debug("Episode terminated: stuck/not moving")
-                return True
-        
         return False
+
     
     def _cleanup(self):
         """Clean up actors and sensors"""
