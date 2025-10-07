@@ -228,7 +228,7 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description='Evaluate trained CARLA agent')
     parser.add_argument('--model', type=str, required=True, help='Path to model')
-    parser.add_argument('--config', type=str, default='configs/town03_easy.yaml')
+    parser.add_argument('--config', type=str, default='town03_easy.yaml')
     parser.add_argument('--episodes', type=int, default=100)
     parser.add_argument('--shield', action='store_true')
     parser.add_argument('--no-shield', dest='shield', action='store_false')
