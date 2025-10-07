@@ -153,34 +153,24 @@ def train_ppo(
     model = PPO(
         "MlpPolicy",
         env,
-        # Rollout parameters
         n_steps=2048,
-        batch_size=128,  # Reduced for more frequent updates
+        batch_size=64,        # ✅ SMALLER - more frequent updates
         n_epochs=10,
-        
-        # Learning parameters
         learning_rate=3e-4,
-        gamma=0.995,  # High discount for long-term planning
+        gamma=0.99,           # ✅ REDUCED from 0.995 - focus on short-term rewards
         gae_lambda=0.95,
-        
-        # PPO specific
         clip_range=0.2,
         clip_range_vf=None,
-        
-        # Regularization
-        ent_coef=0.005,  # Reduced from 0.01 for less randomness
+        ent_coef=0.01,        # ✅ INCREASED from 0.005 - more exploration
         vf_coef=0.5,
         max_grad_norm=0.5,
-        
-        # Network architecture (deeper for better feature learning)
         policy_kwargs=dict(
             net_arch=dict(
-                pi=[256, 256, 128],  # Policy network
-                vf=[256, 256, 128]   # Value network
+                pi=[256, 256, 128],
+                vf=[256, 256, 128]
             ),
             activation_fn=torch.nn.ReLU
         ),
-        
         verbose=1,
         tensorboard_log=f"./tensorboard/{experiment_name}",
         device='cuda' if torch.cuda.is_available() else 'cpu'
