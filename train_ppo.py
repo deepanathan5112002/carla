@@ -154,14 +154,14 @@ def train_ppo(
         "MlpPolicy",
         env,
         n_steps=2048,
-        batch_size=64,        # ✅ SMALLER - more frequent updates
+        batch_size=64,
         n_epochs=10,
-        learning_rate=3e-4,
-        gamma=0.99,           # ✅ REDUCED from 0.995 - focus on short-term rewards
+        learning_rate=5e-4,      # ✅ INCREASE from 3e-4
+        gamma=0.99,
         gae_lambda=0.95,
         clip_range=0.2,
         clip_range_vf=None,
-        ent_coef=0.01,        # ✅ INCREASED from 0.005 - more exploration
+        ent_coef=0.02,           # ✅ INCREASE from 0.01 - MORE exploration
         vf_coef=0.5,
         max_grad_norm=0.5,
         policy_kwargs=dict(
