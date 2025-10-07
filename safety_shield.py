@@ -17,44 +17,45 @@ class SafetyShield:
     ) -> np.ndarray:
         """Apply safety filters to action"""
         
+        if len(observation) < 15:
+            return action.copy()
+        
         filtered_action = action.copy()
+        speed_kmh = observation[0] * 100.0
         
-        # Extract relevant info from observation
-        speed = observation[0] * 30.0  # De-normalize
-        
-        # Stop sign/red light enforcement
-        if rule_state['must_stop'] or rule_state['traffic_light'] == 'red':
-            if speed > 1.0:  # Still moving
-                filtered_action[1] = 0.0  # No throttle
-                filtered_action[2] = 1.0  # Full brake
+        # Rule 1: Stop sign/red light (KEEP THIS)
+        if rule_state.get('must_stop', False) or rule_state.get('traffic_light') == 'red':
+            if speed_kmh > 1.0:
+                filtered_action[1] = 0.0
+                filtered_action[2] = 1.0
                 self.stop_timer = 0
             elif self.stop_timer < self.min_stop_duration:
-                filtered_action[1] = 0.0  # Hold stop
-                filtered_action[2] = 0.5  # Light brake
+                filtered_action[1] = 0.0
+                filtered_action[2] = 0.5
                 self.stop_timer += 1
         else:
             self.stop_timer = 0
         
-        # Speed limit enforcement
-        speed_limit = rule_state['speed_limit']
-        if speed > speed_limit + 5:  # 5 km/h tolerance
-            filtered_action[1] = min(filtered_action[1], 0.3)  # Limit throttle
-            if speed > speed_limit + 10:
-                filtered_action[1] = 0.0
-                filtered_action[2] = max(filtered_action[2], 0.5)
+        # Rule 2: Speed limit (MUCH MORE LENIENT)
+        speed_limit = rule_state.get('speed_limit', 50)
+        tolerance = 15  # ✅ INCREASED from 5 to 15 km/h
         
-        # No-entry zone protection
-        if rule_state['no_entry']:
-            filtered_action[1] = 0.0  # No forward movement
-            filtered_action[2] = 1.0  # Stop
-            # Force turn away (simplified)
+        if speed_kmh > speed_limit + tolerance:
+            filtered_action[1] = min(filtered_action[1], 0.5)  # ✅ Allow more throttle
+            
+            if speed_kmh > speed_limit + 2 * tolerance:
+                filtered_action[1] = 0.0
+                filtered_action[2] = max(filtered_action[2], 0.3)  # ✅ Gentler braking
+        
+        # Rule 3: No-entry (KEEP THIS)
+        if rule_state.get('no_entry', False):
+            filtered_action[1] = 0.0
+            filtered_action[2] = 1.0
             if abs(filtered_action[0]) < 0.5:
                 filtered_action[0] = 1.0 if np.random.random() > 0.5 else -1.0
         
-        # Anti-collision (basic)
-        collision_flag = observation[4]
-        if collision_flag > 0.5:
-            filtered_action[2] = 1.0  # Emergency brake
+        # ✅ REMOVE anti-collision and lane keeping from shield
+        # Let the RL agent learn these behaviors!
         
         return filtered_action
     
