@@ -387,90 +387,64 @@ class CarlaRuleAwareEnv(gym.Env):
         return obs, reward, terminated, truncated, info
     
     def _compute_reward(self, action: np.ndarray, obs: np.ndarray) -> float:
-        """Optimized reward computation"""
+        """Simplified, working reward function"""
         reward = 0.0
-        reward_config = self.config['rewards']
         
         vehicle_location = self.vehicle.get_location()
         velocity = self.vehicle.get_velocity()
         speed_ms = np.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2)
         speed_kmh = 3.6 * speed_ms
         
-        # 1. Progress reward (shaped)
+        # 1. PROGRESS REWARD (most important!)
         dist_to_dest = vehicle_location.distance(self.destination)
         if self.last_dist_to_dest is not None:
             progress = self.last_dist_to_dest - dist_to_dest
             if progress > 0:
-                reward += reward_config['progress'] * progress
+                reward += 10.0 * progress  # +10 per meter forward
+            else:
+                reward -= 5.0 * abs(progress)  # -5 per meter backward
         self.last_dist_to_dest = dist_to_dest
         
-        # 2. Lane keeping (quadratic penalty for smoothness)
-        lane_offset = obs[2] * 5.0  # Denormalize
-        reward -= reward_config['lane_keeping'] * (lane_offset ** 2)
-        
-        # Track off-road
-        if abs(lane_offset) > 2.0:
-            self.episode_metrics['off_road_steps'] += 1
-        
-        # 3. Speed compliance (only penalize significant violations)
+        # 2. SPEED REWARD (encourage movement)
         speed_limit = self.last_rule_state['speed_limit']
-        if speed_kmh > speed_limit + 10:  # 10 km/h tolerance
-            excess = speed_kmh - speed_limit
-            reward -= reward_config['speed_compliance'] * (excess / 10.0)
-            self.episode_metrics['speed_violations'] += 1
+        target_speed = min(speed_limit - 5, 40)  # Drive 5 under limit
         
-        # 4. Stop compliance
-        if self.last_rule_state['must_stop'] and speed_kmh > 3.0:
-            reward -= reward_config['stop_compliance']
-            self.episode_metrics['stop_violations'] += 1
+        if 5.0 < speed_kmh < speed_limit:
+            # Reward being in safe speed range
+            speed_factor = 1.0 - abs(speed_kmh - target_speed) / target_speed
+            reward += 1.0 * speed_factor
+        elif speed_kmh < 3.0:
+            # Heavy penalty for stopping (unless required)
+            if not self.last_rule_state['must_stop']:
+                reward -= 2.0
+        elif speed_kmh > speed_limit + 10:
+            # Penalty for speeding
+            excess = (speed_kmh - speed_limit) / 10.0
+            reward -= 0.5 * excess
         
-        # 5. Collision penalty (terminal)
+        # 3. LANE KEEPING (smooth penalty)
+        lane_offset = obs[2] * 5.0
+        reward -= 0.1 * (lane_offset ** 2)
+        
+        # 4. TERMINAL PENALTIES
         if len(self.collision_hist) > 0:
-            reward += reward_config['collision']
-            self.episode_metrics['collisions'] += len(self.collision_hist)
+            reward -= 50.0  # Large one-time penalty
             self.collision_hist.clear()
+            
+        if abs(lane_offset) > 3.5:
+            reward -= 10.0 * (abs(lane_offset) - 3.5)  # Escalating
         
-        # 6. Off-road penalty (smoothed)
-        waypoint = self.map.get_waypoint(vehicle_location)
-        if not waypoint.is_junction and abs(lane_offset) > 3.0:
-            reward += reward_config['off_road'] * 0.1  # Soft penalty per step
+        # 5. TRAFFIC RULES
+        if self.last_rule_state['must_stop'] and speed_kmh > 2.0:
+            reward -= 1.0
         
-        # 7. Lane invasion penalty
-        if len(self.lane_invasion_hist) > 0:
-            reward -= 5.0  # Reduced from 10
-            self.episode_metrics['lane_invasions'] += len(self.lane_invasion_hist)
-            self.lane_invasion_hist.clear()
-        
-        # 8. Smooth control bonus (reduce jerkiness)
+        # 6. SMOOTHNESS (optional)
         if hasattr(self, '_last_action'):
-            action_diff = np.abs(action - self._last_action)
-            smoothness_penalty = -0.1 * np.sum(action_diff)
-            reward += smoothness_penalty
+            jerk = np.sum(np.abs(action - self._last_action))
+            reward -= 0.05 * jerk
         self._last_action = action.copy()
         
-        # 9. Forward progress bonus (encourage moving)
-        if self.step_count > 100:  # After initial settling
-            if speed_kmh < 5.0:  # Too slow
-                reward -= 2.0  # Strong penalty for not moving
-            elif speed_kmh < 15.0:  # Moving but too cautious
-                reward -= 0.5
-    
-        # 10. Bonus for maintaining good speed
-        if 20.0 < speed_kmh < speed_limit:
-            reward += 0.5
-
-        # 11. Exploration bonus (encourage trying new things)
-        if self.step_count < 1000:  # Only during episode
-            if speed_kmh > 25.0:  # Reward for going faster
-                reward += 1.0
-            
-        # 12. Big bonus for surviving long episodes
-        if self.step_count > 1000:
-            reward += 5.0  # Staying alive bonus
-        if self.step_count > 1500:
-            reward += 10.0  # Even bigger bonus
-
-        return float(np.clip(reward, -100.0, 100.0))
+        return float(np.clip(reward, -50.0, 50.0))  # Clip to reasonable range
     
     def _check_termination(self, obs: np.ndarray) -> bool:
         """Check if episode should terminate"""
