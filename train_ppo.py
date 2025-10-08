@@ -125,7 +125,7 @@ def train_ppo(
             norm_reward=True,
             clip_obs=10.0,
             clip_reward=10.0,
-            gamma=0.995
+            gamma=0.99
         )
         logger.info("Observation normalization enabled")
     
