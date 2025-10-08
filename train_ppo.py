@@ -161,7 +161,7 @@ def train_ppo(
         gae_lambda=0.95,
         clip_range=0.2,
         clip_range_vf=None,
-        ent_coef=0.02,           # ✅ INCREASE from 0.01 - MORE exploration
+        ent_coef=0.1,           # ✅ INCREASE from 0.01 - MORE exploration
         vf_coef=0.5,
         max_grad_norm=0.5,
         policy_kwargs=dict(
