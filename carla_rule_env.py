@@ -359,6 +359,16 @@ class CarlaRuleAwareEnv(gym.Env):
         control.manual_gear_shift = False
         
         self.vehicle.apply_control(control)
+        # In carla_rule_env.py, step() function, add before world.tick():
+
+        if self.step_count % 200 == 0:  # Log every 200 steps
+            logger.info(
+                f"Step {self.step_count}: "
+                f"speed={speed_kmh:.1f} km/h, "
+                f"dist={self.episode_metrics['distance_traveled']:.1f}m, "
+                f"reward={reward:.2f}, "
+                f"action=[{action[0]:.2f}, {action[1]:.2f}, {action[2]:.2f}]"
+            )
         
         # Tick simulation
         self.world.tick()
