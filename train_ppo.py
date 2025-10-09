@@ -1,307 +1,275 @@
-#!/usr/bin/env python3
-"""
-PPO training script for CARLA (3D action: steer, accel, brake).
-
-- Sync CARLA env assumed (see carla_rule_env.py)
-- Uses SB3 (Gymnasium) with VecNormalize, EvalCallback, and checkpoints
-- Logs to TensorBoard: --log-dir runs/ppo_<exp>
-
-Requirements:
-  stable-baselines3>=2.3, gymnasium, numpy, torch, carla PythonAPI (via PYTHONPATH)
-"""
-
-import argparse
 import os
-import time
-import random
-from pathlib import Path
-from typing import Optional
-
+import sys
 import numpy as np
 import torch
+import yaml
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import (
-    CheckpointCallback,
-    EvalCallback,
-    StopTrainingOnNoModelImprovement,
-)
+from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor, VecNormalize
+from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback, CallbackList
+from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize, VecMonitor
+import logging
 
-from carla_rule_env import CarlaRuleEnv, EnvConfig
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+from carla_rule_env import CarlaRuleAwareEnv
+from safety_shield import SafetyShield
+from infer_onnx import TrafficSignDetector
 
-# ---------------------------
-# Utilities
-# ---------------------------
-def set_global_seeds(seed: int):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
-def make_env(cfg: EnvConfig, record_stats: bool = True):
-    """
-    Factory for a single CARLA env. Wrapped with Monitor (episode stats).
-    """
-    def _thunk():
-        env = CarlaRuleEnv(cfg=cfg, shield=None)  # plug your shield if you want
-        if record_stats:
-            env = Monitor(env)  # works with gymnasium in SB3 v2
+class ShieldedCarlaEnv(CarlaRuleAwareEnv):
+    """CARLA environment with safety shield and perception"""
+    
+    def __init__(self, config_path: str, port: int = 2000, use_shield: bool = True):
+        super().__init__(config_path, port)
+        
+        self.use_shield = use_shield
+        if use_shield:
+            self.safety_shield = SafetyShield(self.config)
+            logger.info("Safety shield enabled")
+        
+        # Initialize perception if model exists
+        model_path = self.config['perception']['model_path']
+        if os.path.exists(model_path):
+            try:
+                self.detector = TrafficSignDetector(
+                    model_path,
+                    confidence_threshold=self.config['perception']['confidence_threshold']
+                )
+                self.use_perception = True
+                logger.info(f"Perception enabled: {model_path}")
+            except Exception as e:
+                logger.warning(f"Failed to load perception model: {e}")
+                self.use_perception = False
+        else:
+            logger.warning(f"Model not found at {model_path}. Running without perception.")
+            self.use_perception = False
+    
+    def step(self, action):
+        """Override step to apply safety shield"""
+        if self.use_shield:
+            obs_pre = self._get_observation()
+            filtered_action = self.safety_shield.filter_action(
+                action, obs_pre, self.last_rule_state
+            )
+        else:
+            filtered_action = action
+        
+        return super().step(filtered_action)
+    
+    def reset(self, seed=None, options=None):
+        """Override reset to reset shield state"""
+        if self.use_shield:
+            self.safety_shield.reset()
+        return super().reset(seed=seed, options=options)
+
+
+def make_env(config_path: str, port: int, seed: int, use_shield: bool = True):
+    """Create a single environment instance with monitoring"""
+    def _init():
+        env = ShieldedCarlaEnv(config_path, port, use_shield)
+        env = Monitor(env)  # Add monitoring wrapper
+        env.reset(seed=seed)
         return env
-    return _thunk
+    
+    set_random_seed(seed)
+    return _init
 
 
-def linear_schedule(initial_value: float):
-    """
-    Linear LR schedule for SB3 (value * progress_remaining).
-    """
-    def func(progress_remaining: float):
-        return progress_remaining * initial_value
-    return func
-
-
-# ---------------------------
-# CLI
-# ---------------------------
-def build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser("PPO training for CARLA (3D action env)")
-
-    # Env / CARLA
-    p.add_argument("--host", type=str, default="127.0.0.1")
-    p.add_argument("--port", type=int, default=2000)
-    p.add_argument("--town", type=str, default=None, help='e.g. "Town03" or None to keep loaded map')
-    p.add_argument("--fps", type=int, default=20)
-    p.add_argument("--spawn-index", type=int, default=0)
-    p.add_argument("--max-steps", type=int, default=2000)
-    p.add_argument("--offroad-threshold", type=float, default=4.0)
-    p.add_argument("--warmup-ticks", type=int, default=3)
-    p.add_argument("--no-rendering-mode", action="store_true", help="Enable CARLA no_rendering_mode")
-
-    # Train
-    p.add_argument("--total-timesteps", type=int, default=500_000)
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--log-dir", type=str, default="runs/ppo_carla")
-    p.add_argument("--tb-log-name", type=str, default="PPO_carla")
-    p.add_argument("--save-freq", type=int, default=50_000, help="Steps between checkpoints (vec steps)")
-    p.add_argument("--eval-freq", type=int, default=25_000, help="Steps between eval runs (vec steps)")
-    p.add_argument("--eval-episodes", type=int, default=5)
-    p.add_argument("--progress-bar", action="store_true", help="Show SB3 progress bar")
-    p.add_argument("--resume", type=str, default=None, help="Path to .zip to resume from")
-
-    # PPO hyperparams (safe defaults for driving)
-    p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--lr-linear", action="store_true", help="Use linear LR schedule from initial --lr")
-    p.add_argument("--clip-range", type=float, default=0.1)
-    p.add_argument("--n-steps", type=int, default=2048)
-    p.add_argument("--batch-size", type=int, default=64)
-    p.add_argument("--n-epochs", type=int, default=10)
-    p.add_argument("--gamma", type=float, default=0.99)
-    p.add_argument("--gae-lambda", type=float, default=0.95)
-    p.add_argument("--ent-coef", type=float, default=0.0)
-    p.add_argument("--vf-coef", type=float, default=1.0)
-
-    # VecNormalize
-    p.add_argument("--norm-obs", action="store_true", help="Normalize observations")
-    p.add_argument("--norm-rew", action="store_true", help="Normalize rewards")
-    p.add_argument("--clip-obs", type=float, default=10.0)
-    p.add_argument("--clip-rew", type=float, default=10.0)
-
-    # Early stopping on eval stagnation
-    p.add_argument("--patience-evals", type=int, default=10, help="No. of eval calls w/o improvement")
-    p.add_argument("--min-delta", type=float, default=1e-6, help="Min reward improvement to reset patience")
-
-    return p
-
-
-# ---------------------------
-# Main
-# ---------------------------
-def main(args: argparse.Namespace):
-    set_global_seeds(args.seed)
-
-    # Paths
-    log_dir = Path(args.log_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    models_dir = log_dir / "models"
-    models_dir.mkdir(exist_ok=True, parents=True)
-
-    # Build EnvConfig
-    env_cfg = EnvConfig(
-        host=args.host,
-        port=args.port,
-        town=args.town,
-        fps=args.fps,
-        max_steps=args.max_steps,
-        offroad_threshold_m=args.offroad_threshold,
-        spawn_index=args.spawn_index,
-        warmup_ticks=args.warmup_ticks,
-        seed=args.seed,
-        no_rendering_mode=args.no_rendering_mode,
-    )
-
-    # Vectorized training env
-    # For CARLA, start with 1 env for stability (increase only if your machine can run multi-client safely)
-    train_env = DummyVecEnv([make_env(env_cfg, record_stats=True)])
-    train_env = VecMonitor(train_env, filename=str(log_dir / "monitor_train.csv"))
-
-    if args.norm_obs or args.norm_rew:
-        train_env = VecNormalize(
-            train_env,
-            norm_obs=args.norm_obs,
-            norm_reward=args.norm_rew,
-            clip_obs=args.clip_obs,
-            clip_reward=args.clip_rew,
-            gamma=args.gamma,
-        )
-
-    # Separate eval env (no reward normalization when evaluating)
-    eval_env = DummyVecEnv([make_env(env_cfg, record_stats=True)])
-    eval_env = VecMonitor(eval_env, filename=str(log_dir / "monitor_eval.csv"))
-
-    # Model
-    lr = linear_schedule(args.lr) if args.lr_linear else args.lr
-    policy_kwargs = dict()  # customize net arch if desired
-
-    if args.resume:
-        print(f"[INFO] Resuming from {args.resume}")
-        model = PPO.load(
-            args.resume,
-            env=train_env,
-            tensorboard_log=str(log_dir),
-            device="auto",
-        )
-        # If VecNormalize was used previously, load stats too:
-        stats_path = Path(args.resume).with_suffix(".vn.pkl")
-        if stats_path.exists() and isinstance(train_env, VecNormalize):
-            train_env.load_statistics(str(stats_path))
+def train_ppo(
+    config_path: str = "configs/town03_optimized.yaml",
+    num_envs: int = 1,
+    total_timesteps: int = 200_000,
+    use_shield: bool = True,
+    use_normalization: bool = True,
+    experiment_name: str = "ppo_optimized"
+):
+    """Main training function with optimizations"""
+    
+    logger.info("="*60)
+    logger.info(f"Starting training: {experiment_name}")
+    logger.info(f"Config: {config_path}")
+    logger.info(f"Num environments: {num_envs}")
+    logger.info(f"Total timesteps: {total_timesteps:,}")
+    logger.info(f"Safety shield: {use_shield}")
+    logger.info(f"Observation normalization: {use_normalization}")
+    logger.info(f"Device: {'cuda' if torch.cuda.is_available() else 'cpu'}")
+    logger.info("="*60)
+    
+    # Create output directories
+    os.makedirs(f"./models/{experiment_name}", exist_ok=True)
+    os.makedirs(f"./logs/{experiment_name}", exist_ok=True)
+    os.makedirs(f"./tensorboard/{experiment_name}", exist_ok=True)
+    
+    # Create environment
+    base_port = 2000
+    logger.info(f"Creating {num_envs} environment(s)...")
+    
+    if num_envs == 1:
+        env = DummyVecEnv([make_env(config_path, base_port, seed=0, use_shield=use_shield)])
     else:
-        model = PPO(
-            policy="MlpPolicy",
-            env=train_env,
-            learning_rate=lr,
-            n_steps=args.n_steps,
-            batch_size=args.batch_size,
-            n_epochs=args.n_epochs,
-            gamma=args.gamma,
-            gae_lambda=args.gae_lambda,
-            clip_range=args.clip_range,
-            ent_coef=args.ent_coef,
-            vf_coef=args.vf_coef,
-            tensorboard_log=str(log_dir),
-            seed=args.seed,
-            policy_kwargs=policy_kwargs,
-            verbose=1,
+        # For multiple envs, use DummyVecEnv (safer than SubprocVecEnv)
+        env = DummyVecEnv([
+            make_env(config_path, base_port, seed=i, use_shield=use_shield)
+            for i in range(num_envs)
+        ])
+    
+    # Add observation normalization for better learning
+    if use_normalization:
+        env = VecNormalize(
+            env, 
+            norm_obs=True, 
+            norm_reward=True,
+            clip_obs=10.0,
+            clip_reward=10.0,
+            gamma=0.99
         )
-
-    # Callbacks: checkpoints + eval (with early stop on no improvement)
-    callbacks = []
-
-    # Checkpoint every save_freq steps
-    callbacks.append(
-        CheckpointCallback(
-            save_freq=args.save_freq,
-            save_path=str(models_dir),
-            name_prefix="ppo_carla",
-            save_replay_buffer=False,
-            save_vecnormalize=True,  # saves VecNormalize stats alongside
+        logger.info("Observation normalization enabled")
+    
+    # Wrap with monitor
+    env = VecMonitor(env, f"logs/{experiment_name}")
+    logger.info("Environment created successfully")
+    
+    # Create eval environment
+    logger.info("Creating evaluation environment...")
+    eval_env = DummyVecEnv([
+        make_env(config_path, base_port, seed=999, use_shield=use_shield)
+    ])
+    if use_normalization:
+        eval_env = VecNormalize(
+            eval_env,
+            norm_obs=True,
+            norm_reward=False,  # Don't normalize rewards during eval
+            clip_obs=10.0,
+            training=False
         )
-    )
-
-    # Early stop if eval doesn't improve
-    stop_cb = StopTrainingOnNoModelImprovement(
-        max_no_improvement_evals=args.patience_evals,
-        min_epsilon=args.min_delta,
+    logger.info("Evaluation environment ready")
+    
+    # Optimized PPO hyperparameters
+    logger.info("Initializing PPO model...")
+    model = PPO(
+        "MlpPolicy",
+        env,
+        n_steps=2048,
+        batch_size=64,
+        n_epochs=10,
+        learning_rate=5e-4,      # ✅ INCREASE from 3e-4
+        gamma=0.99,
+        gae_lambda=0.95,
+        clip_range=0.2,
+        clip_range_vf=None,
+        ent_coef=0.1,           # ✅ INCREASE from 0.01 - MORE exploration
+        vf_coef=0.5,
+        max_grad_norm=0.5,
+        policy_kwargs=dict(
+            net_arch=dict(
+                pi=[256, 256, 128],
+                vf=[256, 256, 128]
+            ),
+            activation_fn=torch.nn.ReLU
+        ),
         verbose=1,
+        tensorboard_log=f"./tensorboard/{experiment_name}",
+        device='cuda' if torch.cuda.is_available() else 'cpu'
     )
-
-    best_model_dir = log_dir / "best_model"
-    best_model_dir.mkdir(exist_ok=True, parents=True)
-
-    eval_cb = EvalCallback(
-        eval_env=eval_env,
-        callback_after_eval=stop_cb,
-        best_model_save_path=str(best_model_dir),
-        log_path=str(log_dir / "eval"),
-        eval_freq=args.eval_freq,
-        n_eval_episodes=args.eval_episodes,
-        deterministic=False,
+    
+    logger.info(f"Model device: {model.device}")
+    logger.info(f"Policy architecture: 3-layer [256, 256, 128]")
+    
+    # Setup callbacks
+    checkpoint_callback = CheckpointCallback(
+        save_freq=10000,
+        save_path=f"./models/{experiment_name}",
+        name_prefix="rl_model",
+        save_replay_buffer=False,
+        save_vecnormalize=True
+    )
+    
+    eval_callback = EvalCallback(
+        eval_env,
+        best_model_save_path=f"./models/{experiment_name}/best",
+        log_path=f"./logs/{experiment_name}/eval",
+        eval_freq=5000,  # Evaluate every 5k steps
+        deterministic=True,
         render=False,
-        warn=True,
+        n_eval_episodes=5
     )
-    callbacks.append(eval_cb)
-
+    
+    # Combine callbacks
+    callback = CallbackList([checkpoint_callback, eval_callback])
+    
     # Train
-    print(f"[INFO] Starting training for {args.total_timesteps:,} timesteps")
-    print(f"[INFO] TensorBoard: {log_dir}  (run with: tensorboard --logdir {log_dir})")
-    start = time.time()
-
-    model.learn(
-        total_timesteps=args.total_timesteps,
-        callback=callbacks,
-        tb_log_name=args.tb_log_name,
-        progress_bar=args.progress_bar,
-    )
-
-    dur = time.time() - start
-    print(f"[INFO] Training finished in {dur/60:.1f} min")
-
-    # Save final artifacts
-    final_path = models_dir / "ppo_carla_final"
-    model.save(str(final_path))
-    print(f"[INFO] Saved final model to {final_path}.zip")
-
-    # Save VecNormalize stats (if used)
-    if isinstance(train_env, VecNormalize):
-        vn_path = str(final_path) + ".vn.pkl"
-        train_env.save(vn_path)
-        print(f"[INFO] Saved VecNormalize stats to {vn_path}")
-
-    # Optional quick eval at the very end
+    logger.info("Starting training loop...")
     try:
-        mean_r, std_r = evaluate(model, eval_env, n_episodes=max(3, args.eval_episodes // 2))
-        print(f"[INFO] Final quick eval: mean_reward={mean_r:.2f} ± {std_r:.2f}")
+        model.learn(
+            total_timesteps=total_timesteps,
+            callback=callback,
+            progress_bar=False  # Disable if tqdm causes issues
+        )
+        
+        # Save final model
+        final_path = f"models/{experiment_name}/final_model"
+        model.save(final_path)
+        
+        # Save normalization stats
+        if use_normalization:
+            env.save(f"models/{experiment_name}/vec_normalize.pkl")
+        
+        logger.info(f"✅ Training completed! Model saved to {final_path}")
+        
+    except KeyboardInterrupt:
+        logger.info("⚠️  Training interrupted by user")
+        interrupted_path = f"models/{experiment_name}/interrupted_model"
+        model.save(interrupted_path)
+        if use_normalization:
+            env.save(f"models/{experiment_name}/vec_normalize_interrupted.pkl")
+        logger.info(f"Model saved to {interrupted_path}")
+    
     except Exception as e:
-        print(f"[WARN] Final eval failed: {e}")
-
-    # Clean up
-    train_env.close()
-    eval_env.close()
-
-
-# ---------------------------
-# Simple eval loop
-# ---------------------------
-def evaluate(model: PPO, vec_env, n_episodes: int = 5):
-    """
-    Runs n episodes on vec_env (assumed VecMonitor) and returns mean ± std episodic reward.
-    """
-    rewards = []
-    for _ in range(n_episodes):
-        obs = vec_env.reset()
-        done = False
-        ep_rew = 0.0
-        # Gymnasium vec env returns arrays; we loop until all sub-envs done
-        states_done = np.array([False] * vec_env.num_envs)
-        while not states_done.all():
-            action, _ = model.predict(obs, deterministic=False)
-            obs, rew, dones, infos = vec_env.step(action)
-            ep_rew += float(np.mean(rew))
-            # for single-env DummyVecEnv this works; for multi-env, track per-env dones
-            if isinstance(dones, np.ndarray):
-                states_done = np.logical_or(states_done, dones)
-            else:
-                states_done = np.array([dones])
-            # optional: break if takes too long
-        rewards.append(ep_rew)
-    return float(np.mean(rewards)), float(np.std(rewards))
+        logger.error(f"❌ Training failed with error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+    
+    finally:
+        logger.info("Closing environments...")
+        env.close()
+        eval_env.close()
+        logger.info("Cleanup complete")
 
 
-# ---------------------------
-# Entrypoint
-# ---------------------------
 if __name__ == "__main__":
-    parser = build_arg_parser()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Train PPO agent in CARLA (Optimized)')
+    parser.add_argument('--config', type=str, default='configs/town03_optimized.yaml',
+                       help='Path to config YAML file')
+    parser.add_argument('--envs', type=int, default=1,
+                       help='Number of parallel environments')
+    parser.add_argument('--timesteps', type=int, default=200_000,
+                       help='Total training timesteps')
+    parser.add_argument('--shield', action='store_true', 
+                       help='Use safety shield')
+    parser.add_argument('--no-shield', dest='shield', action='store_false',
+                       help='Disable safety shield')
+    parser.add_argument('--normalize', action='store_true',
+                       help='Use observation normalization')
+    parser.add_argument('--no-normalize', dest='normalize', action='store_false',
+                       help='Disable normalization')
+    parser.add_argument('--name', type=str, default='ppo_optimized',
+                       help='Experiment name')
+    parser.set_defaults(shield=True, normalize=True)
+    
     args = parser.parse_args()
-    main(args)
-
+    
+    train_ppo(
+        config_path=args.config,
+        num_envs=args.envs,
+        total_timesteps=args.timesteps,
+        use_shield=args.shield,
+        use_normalization=args.normalize,
+        experiment_name=args.name
+    )
