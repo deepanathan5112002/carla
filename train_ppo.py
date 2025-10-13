@@ -164,12 +164,11 @@ def train_ppo(
         ent_coef=0.1,           # ✅ INCREASE from 0.01 - MORE exploration
         vf_coef=0.5,
         max_grad_norm=0.5,
+        #policy_kwargs=dict(net_arch=dict(pi=[256, 256, 128],vf=[256, 256, 128]),activation_fn=torch.nn.ReLU),
         policy_kwargs=dict(
-            net_arch=dict(
-                pi=[256, 256, 128],
-                vf=[256, 256, 128]
-            ),
-            activation_fn=torch.nn.ReLU
+            net_arch=dict(pi=[128, 128], vf=[128, 128]),  # Smaller network
+            activation_fn=torch.nn.Tanh,  # Better for continuous control
+            log_std_init=-2.0,  # Start with less random actions
         ),
         verbose=1,
         tensorboard_log=f"./tensorboard/{experiment_name}",
