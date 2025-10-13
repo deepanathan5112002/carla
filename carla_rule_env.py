@@ -409,81 +409,46 @@ class CarlaRuleAwareEnv(gym.Env):
         return obs, reward, terminated, truncated, info
     
     def _compute_reward(self, action: np.ndarray, obs: np.ndarray) -> float:
-        """Simplified, working reward function"""
         reward = 0.0
         
-        vehicle_location = self.vehicle.get_location()
+        # 1. FORWARD PROGRESS (simplified)
         velocity = self.vehicle.get_velocity()
-        speed_ms = np.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2)
-        speed_kmh = 3.6 * speed_ms
+        forward_speed = velocity.x * np.cos(transform.rotation.yaw * np.pi/180) + \
+                       velocity.y * np.sin(transform.rotation.yaw * np.pi/180)
         
-        # 1. PROGRESS REWARD (most important!)
-        dist_to_dest = vehicle_location.distance(self.destination)
-        if self.last_dist_to_dest is not None:
-            progress = self.last_dist_to_dest - dist_to_dest
-            if progress > 0:
-                reward += 10.0 * progress  # +10 per meter forward
-            else:
-                reward -= 5.0 * abs(progress)  # -5 per meter backward
-        self.last_dist_to_dest = dist_to_dest
+        # Reward forward movement
+        if forward_speed > 0.5:  # Moving forward
+            reward += 5.0 * min(forward_speed, 10.0)  # Cap at reasonable speed
+        elif forward_speed < -0.5:  # Moving backward
+            reward -= 2.0
+        else:  # Stopped
+            reward -= 1.0  # Small penalty, not huge
         
-        # 2. SPEED REWARD (encourage movement)
-        speed_limit = self.last_rule_state['speed_limit']
-        target_speed = min(speed_limit - 5, 40)  # Drive 5 under limit
+        # 2. SURVIVAL BONUS
+        reward += 1.0  # Just for staying alive
         
-        if 5.0 < speed_kmh < speed_limit:
-            # Reward being in safe speed range
-            speed_factor = 1.0 - abs(speed_kmh - target_speed) / target_speed
-            reward += 1.0 * speed_factor
-        elif speed_kmh < 3.0:
-            # Heavy penalty for stopping (unless required)
-            if not self.last_rule_state['must_stop']:
-                reward -= 2.0
-        elif speed_kmh > speed_limit + 10:
-            # Penalty for speeding
-            excess = (speed_kmh - speed_limit) / 10.0
-            reward -= 0.5 * excess
-        
-        # 3. LANE KEEPING (smooth penalty)
-        lane_offset = obs[2] * 5.0
-        reward -= 0.1 * (lane_offset ** 2)
-        
-        # 4. TERMINAL PENALTIES
+        # 3. COLLISION PENALTY (terminal)
         if len(self.collision_hist) > 0:
-            reward -= 50.0  # Large one-time penalty
-            self.collision_hist.clear()
+            reward -= 100.0
             
-        if abs(lane_offset) > 3.5:
-            reward -= 10.0 * (abs(lane_offset) - 3.5)  # Escalating
-        
-        # 5. TRAFFIC RULES
-        if self.last_rule_state['must_stop'] and speed_kmh > 2.0:
-            reward -= 1.0
-        
-        # 6. SMOOTHNESS (optional)
-        if hasattr(self, '_last_action'):
-            jerk = np.sum(np.abs(action - self._last_action))
-            reward -= 0.05 * jerk
-        self._last_action = action.copy()
-        
-        return float(np.clip(reward, -50.0, 50.0))  # Clip to reasonable range
+        return float(np.clip(reward, -100.0, 20.0))
     
     def _check_termination(self, obs: np.ndarray) -> bool:
-        """Check if episode should terminate"""
-        # Collision termination
+        # Only terminate on collision or success
         if self.episode_metrics['collisions'] > 0:
             return True
         
-        # Reached destination
-        vehicle_location = self.vehicle.get_location()
-        if vehicle_location.distance(self.destination) < 5.0:
-            self.episode_metrics['route_completion'] = 1.0
+        if vehicle_location.distance(self.destination) < 10.0:  # More lenient
             return True
         
-        # Off-road termination (MUCH MORE LENIENT)
-        lane_offset = obs[2] * 5.0
-        if abs(lane_offset) > 10.0:  
-            return True
+        # Much more lenient off-road check
+        lane_offset = abs(obs[2] * 5.0)
+        if lane_offset > 4.0:  # Only if WAY off road
+            self.episode_metrics['off_road_steps'] += 1
+            if self.episode_metrics['off_road_steps'] > 20:  # Give time to recover
+                return True
+        else:
+            self.episode_metrics['off_road_steps'] = 0
         
         return False
 
