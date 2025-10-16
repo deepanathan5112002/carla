@@ -1,14 +1,222 @@
-# configs/town03_simple.yaml
-environment:
-  town: "Town03"
-  weather: "ClearNoon"
-  num_npc_vehicles: 0  # NO traffic
-  num_npc_pedestrians: 0
+# Improved CARLA Environment Configuration
+# Optimized for LIDAR + Waypoint navigation
+
+# CARLA connection settings
+carla:
+  host: 'localhost'
+  port: 2000
+  timeout: 15.0
+  town: 'Town03'  # Change to Town01-07 as needed
+  sync_mode: true
+  fixed_delta_seconds: 0.05  # 20 FPS
+
+# Sensor configurations
+sensors:
+  camera:
+    width: 640  # Reduced for performance (was 800)
+    height: 480  # Reduced for performance (was 600)
+    fov: 90
+    x: 2.0  # Forward position
+    z: 1.5  # Height
   
-rewards:
-  forward_speed: 10.0
-  survival: 1.0
-  collision: -50.0
+  lidar:
+    channels: 32
+    range: 50.0  # meters
+    points_per_second: 56000
+    rotation_frequency: 10.0
+    upper_fov: 10.0
+    lower_fov: -30.0
+    x: 0.0
+    z: 2.5  # Mount on roof
   
+  collision:
+    enabled: true
+  
+  lane_invasion:
+    enabled: true
+
+# Reinforcement Learning settings
 rl:
-  max_steps: 1000  # Shorter episodes
+  max_steps: 500  # Max steps per episode (25 seconds at 20 FPS)
+  
+  # Reward weights (used in environment)
+  reward:
+    collision: -200.0
+    waypoint_reached: 15.0
+    speed_optimal: 1.5
+    lane_keeping: 1.0
+    survival: 0.1
+    close_call: -10.0
+    stuck: -5.0
+  
+  # Termination conditions
+  termination:
+    collision: true
+    destination_reached: true
+    off_road_timeout: 50  # steps
+    stuck_timeout: 100  # steps (5 seconds)
+    max_lane_offset: 10.0  # meters
+
+# Navigation settings
+navigation:
+  waypoint_spacing: 5.0  # meters between waypoints
+  destination_distance:
+    easy: [50.0, 100.0]    # min, max distance for easy mode
+    medium: [100.0, 200.0]
+    hard: [150.0, 300.0]
+
+# Traffic settings (spawned based on difficulty)
+traffic:
+  easy:
+    num_vehicles: 0
+    num_pedestrians: 0
+  medium:
+    num_vehicles: 20
+    num_pedestrians: 0
+  hard:
+    num_vehicles: 50
+    num_pedestrians: 10
+  
+  # Traffic Manager settings
+  traffic_manager:
+    port: 8000
+    auto_lane_change: true
+    distance_to_leading_vehicle: 5.0
+    vehicle_percentage_speed_difference: 20.0  # % variation
+
+# Perception model settings (optional - for traffic sign detection)
+perception:
+  enabled: false  # Set to true if you have trained model
+  model_path: 'models/perception/traffic_signs.onnx'
+  confidence_threshold: 0.5
+  inference_interval: 3  # Process every 3rd frame
+
+# Safety shield settings
+safety_shield:
+  enabled: true
+  
+  # Emergency brake conditions
+  emergency_brake:
+    min_obstacle_distance: 3.0  # meters
+    max_approach_speed: 10.0  # km/h when close to obstacle
+  
+  # Speed limits
+  speed_limits:
+    default: 50.0  # km/h
+    junction: 20.0
+    near_obstacle: 30.0
+  
+  # Steering limits
+  steering:
+    max_change_rate: 0.3  # Maximum steering change per step
+
+# Curriculum learning settings
+curriculum:
+  enabled: true
+  
+  # Progression thresholds (success rate needed to advance)
+  thresholds:
+    easy_to_medium: 0.5   # 50% success rate
+    medium_to_hard: 0.4   # 40% success rate
+  
+  # Minimum episodes before checking progression
+  min_episodes_before_check: 30
+  
+  # Timesteps between progression checks
+  check_interval: 50000
+
+# Evaluation settings
+evaluation:
+  episodes: 50
+  deterministic: true
+  render: false
+  
+  # Success criteria
+  success:
+    min_route_completion: 0.95  # 95% of route completed
+    max_collisions: 0
+    max_off_road_time: 10  # seconds
+
+# Training hyperparameters (PPO specific)
+training:
+  algorithm: 'PPO'
+  
+  # PPO hyperparameters
+  ppo:
+    n_steps: 2048
+    batch_size: 128
+    n_epochs: 10
+    learning_rate: 0.0003
+    gamma: 0.99
+    gae_lambda: 0.95
+    clip_range: 0.2
+    ent_coef: 0.03  # Entropy coefficient for exploration
+    vf_coef: 0.5
+    max_grad_norm: 0.5
+    
+  # Network architecture
+  network:
+    policy_layers: [256, 256]  # 2 hidden layers
+    value_layers: [256, 256]
+    activation: 'tanh'
+    log_std_init: -1.0
+  
+  # Observation normalization
+  normalize_obs: true
+  normalize_reward: false
+  clip_obs: 10.0
+  
+  # Checkpointing
+  checkpoint:
+    save_freq: 20000  # Save every 20k steps
+    keep_best: true
+  
+  # Evaluation during training
+  eval:
+    freq: 10000  # Evaluate every 10k steps
+    episodes: 5
+
+# Logging settings
+logging:
+  level: 'INFO'  # DEBUG, INFO, WARNING, ERROR
+  
+  # TensorBoard logging
+  tensorboard:
+    enabled: true
+    log_interval: 100  # Log every N steps
+  
+  # Metrics to track
+  metrics:
+    - episode_reward
+    - episode_length
+    - collision_rate
+    - success_rate
+    - waypoints_reached
+    - distance_traveled
+    - max_speed
+    - close_calls
+    - lane_invasions
+
+# Performance optimizations
+performance:
+  # Rendering quality
+  quality_level: 'Low'  # Low, Medium, High
+  render_offscreen: true
+  
+  # Sensor optimization
+  camera_compression: true
+  lidar_sample_reduction: false
+  
+  # Multi-threading
+  num_workers: 1  # For data collection (increase for parallel envs)
+  
+  # GPU settings
+  device: 'auto'  # 'auto', 'cuda', 'cpu'
+  
+# Debug settings
+debug:
+  enabled: false
+  visualize_lidar: false
+  visualize_waypoints: false
+  log_detailed_metrics: false
+  save_episode_videos: false
